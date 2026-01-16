@@ -469,6 +469,17 @@ impl App {
         container(content)
             .width(Length::Fill)
             .height(Length::Fill)
+            .style(|theme: &Theme| {
+                let palette = theme.extended_palette();
+                container::Style {
+                    border: iced::Border {
+                        color: palette.primary.strong.color,
+                        width: 2.0,
+                        radius: 8.0.into(),
+                    },
+                    ..Default::default()
+                }
+            })
             .into()
     }
 
