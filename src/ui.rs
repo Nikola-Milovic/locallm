@@ -3,16 +3,17 @@ use crate::config::Config;
 use crate::gpu_stats::{read_amd_gpu_stats, GpuStats};
 use crate::ollama::{ChatMessage, OllamaClient};
 use iced::widget::{
-    button, column, container, horizontal_space, pick_list, row, scrollable, text, text_input,
+    button, column, container, horizontal_space, pick_list, row, scrollable, text, text_editor,
     vertical_space, Column,
 };
+use iced::keyboard;
 use iced::{Element, Length, Subscription, Task, Theme};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub enum Message {
     // Input
-    InputChanged(String),
+    InputChanged(text_editor::Action),
     Submit,
 
     // Ollama
@@ -26,12 +27,16 @@ pub enum Message {
 
     // Chat management
     ClearChat,
-    CopyLastResponse,
+    CopyMessage(usize),
     CopyComplete(Result<(), String>),
 
     // GPU stats
     GpuStatsTick,
     GpuStatsUpdated(Option<GpuStats>),
+    
+    // Keyboard
+    ShiftPressed,
+    ShiftReleased,
 }
 
 #[derive(Debug, Clone)]
@@ -57,12 +62,15 @@ pub struct App {
 
     // Chat state
     chat_history: Vec<ChatEntry>,
-    current_input: String,
+    input_content: text_editor::Content,
     status: Status,
     status_message: String,
 
     // GPU stats
     gpu_stats: Option<GpuStats>,
+    
+    // Track if shift is held
+    shift_held: bool,
 }
 
 impl App {
@@ -75,10 +83,11 @@ impl App {
             available_models: Vec::new(),
             selected_model: None,
             chat_history: Vec::new(),
-            current_input: String::new(),
+            input_content: text_editor::Content::new(),
             status: Status::Disconnected,
             status_message: String::from("Connecting to Ollama..."),
             gpu_stats: None,
+            shift_held: false,
         };
 
         // Initial tasks: check Ollama status and load models
@@ -105,18 +114,45 @@ impl App {
             Subscription::none()
         };
 
-        gpu_sub
+        // Track shift key state
+        let shift_sub = keyboard::on_key_press(|key, _| {
+            match key {
+                keyboard::Key::Named(keyboard::key::Named::Shift) => Some(Message::ShiftPressed),
+                _ => None,
+            }
+        });
+        
+        let shift_release_sub = keyboard::on_key_release(|key, _| {
+            match key {
+                keyboard::Key::Named(keyboard::key::Named::Shift) => Some(Message::ShiftReleased),
+                _ => None,
+            }
+        });
+
+        Subscription::batch([gpu_sub, shift_sub, shift_release_sub])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::InputChanged(input) => {
-                self.current_input = input;
+            Message::InputChanged(action) => {
+                // Check if this is an Enter key - submit if Shift is NOT held
+                let is_enter = matches!(
+                    action,
+                    text_editor::Action::Edit(text_editor::Edit::Enter)
+                );
+                
+                if is_enter && !self.shift_held {
+                    // Submit instead of inserting newline
+                    return self.update(Message::Submit);
+                }
+                
+                self.input_content.perform(action);
                 Task::none()
             }
 
             Message::Submit => {
-                if self.current_input.trim().is_empty() {
+                let input_text = self.input_content.text();
+                if input_text.trim().is_empty() {
                     return Task::none();
                 }
                 if self.status == Status::Generating {
@@ -129,12 +165,12 @@ impl App {
                 };
 
                 // Add user message to history
-                let user_msg = self.current_input.clone();
+                let user_msg = input_text.trim().to_string();
                 self.chat_history.push(ChatEntry {
                     role: "user".to_string(),
                     content: user_msg.clone(),
                 });
-                self.current_input.clear();
+                self.input_content = text_editor::Content::new();
                 self.status = Status::Generating;
                 self.status_message = String::from("Generating...");
 
@@ -280,28 +316,30 @@ impl App {
 
             Message::ClearChat => {
                 self.chat_history.clear();
+                self.input_content = text_editor::Content::new();
                 self.status_message = String::from("Chat cleared");
                 Task::none()
             }
 
-            Message::CopyLastResponse => {
-                if let Some(last) = self.chat_history.iter().rev().find(|e| e.role == "assistant") {
-                    let content = last.content.clone();
+            Message::CopyMessage(idx) => {
+                if let Some(entry) = self.chat_history.get(idx) {
+                    let content = entry.content.clone();
+                    let role = entry.role.clone();
+                    self.status_message = format!("📋 Copied {} message!", role);
                     Task::perform(
                         async move { clipboard::copy_to_clipboard(&content).await },
                         Message::CopyComplete,
                     )
                 } else {
-                    self.status_message = String::from("No response to copy");
                     Task::none()
                 }
             }
 
             Message::CopyComplete(result) => {
-                match result {
-                    Ok(()) => self.status_message = String::from("Copied to clipboard"),
-                    Err(e) => self.status_message = format!("Copy failed: {e}"),
+                if let Err(e) = result {
+                    self.status_message = format!("Copy failed: {e}");
                 }
+                // On success, keep the message we already set
                 Task::none()
             }
 
@@ -311,6 +349,16 @@ impl App {
 
             Message::GpuStatsUpdated(stats) => {
                 self.gpu_stats = stats;
+                Task::none()
+            }
+            
+            Message::ShiftPressed => {
+                self.shift_held = true;
+                Task::none()
+            }
+            
+            Message::ShiftReleased => {
+                self.shift_held = false;
                 Task::none()
             }
         }
@@ -328,13 +376,11 @@ impl App {
 
         let refresh_btn = button("↻").on_press(Message::RefreshModels);
         let clear_btn = button("Clear").on_press(Message::ClearChat);
-        let copy_btn = button("Copy").on_press(Message::CopyLastResponse);
 
         let toolbar = row![
             model_picker,
             refresh_btn,
             clear_btn,
-            copy_btn,
             horizontal_space(),
         ]
         .spacing(8)
@@ -353,33 +399,38 @@ impl App {
         } else {
             let mut chat_column = Column::new().spacing(12).padding(8);
 
-            for entry in &self.chat_history {
-                let bubble = self.render_message(&entry.role, &entry.content);
+            for (idx, entry) in self.chat_history.iter().enumerate() {
+                let bubble = self.render_message(idx, &entry.role, &entry.content);
                 chat_column = chat_column.push(bubble);
             }
 
             // Show "thinking" indicator while generating
             if self.status == Status::Generating {
-                let thinking = self.render_message("assistant", "...");
-                chat_column = chat_column.push(thinking);
+                let thinking = container(text("...").size(14))
+                    .padding(12)
+                    .style(container::bordered_box)
+                    .max_width(500);
+                chat_column = chat_column.push(
+                    row![thinking, horizontal_space()].width(Length::Fill)
+                );
             }
 
             scrollable(chat_column)
-                .height(Length::Fill)
+                .height(Length::FillPortion(5))
                 .into()
         };
 
-        // Input row
+        // Input area
         let is_generating = self.status == Status::Generating;
-        let input = text_input("Type your message...", &self.current_input)
-            .on_input(Message::InputChanged)
-            .on_submit(Message::Submit)
-            .width(Length::Fill);
+        let input = text_editor(&self.input_content)
+            .placeholder("Type your message...")
+            .on_action(Message::InputChanged)
+            .height(Length::Fixed(80.0));
 
         let send_btn = button(if is_generating { "..." } else { "Send" })
             .on_press_maybe((!is_generating && self.selected_model.is_some()).then_some(Message::Submit));
 
-        let input_row = row![input, send_btn].spacing(8);
+        let input_row = row![input, send_btn].spacing(8).align_y(iced::Alignment::End);
 
         // Status bar with GPU stats
         let status_text = text(&self.status_message).size(12);
@@ -421,21 +472,23 @@ impl App {
             .into()
     }
 
-    fn render_message<'a>(&self, role: &str, content: &'a str) -> Element<'a, Message> {
+    fn render_message(&self, idx: usize, role: &str, content: &str) -> Element<'_, Message> {
         let is_user = role == "user";
 
-        let bubble_style = if is_user {
-            container::rounded_box
+        let msg_text = text(content.to_string()).size(14);
+
+        // Make the bubble a clickable button to copy
+        let bubble = button(
+            container(msg_text)
+                .padding(12)
+                .max_width(500)
+        )
+        .style(if is_user {
+            button::secondary
         } else {
-            container::bordered_box
-        };
-
-        let msg_text = text(content).size(14);
-
-        let bubble = container(msg_text)
-            .padding(12)
-            .style(bubble_style)
-            .max_width(500);
+            button::primary
+        })
+        .on_press(Message::CopyMessage(idx));
 
         if is_user {
             row![horizontal_space(), bubble]
