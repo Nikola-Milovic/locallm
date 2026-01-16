@@ -5,7 +5,7 @@ mod ollama;
 mod ui;
 
 use config::Config;
-use iced::{window, Size};
+use iced::window;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 fn main() -> iced::Result {
@@ -37,9 +37,13 @@ fn main() -> iced::Result {
         .subscription(ui::App::subscription)
         .theme(ui::App::theme)
         .window(window::Settings {
-            size: Size::new(800.0, 700.0),
-            min_size: Some(Size::new(500.0, 400.0)),
+            size: iced::Size::new(800.0, 700.0),
+            min_size: Some(iced::Size::new(500.0, 400.0)),
             resizable: true,
+            platform_specific: window::settings::PlatformSpecific {
+                application_id: String::from("locallm"),
+                ..Default::default()
+            },
             ..Default::default()
         })
         .run_with(|| ui::App::new(config))
