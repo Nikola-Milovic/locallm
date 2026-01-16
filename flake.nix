@@ -26,13 +26,13 @@
         nativeBuildInputs = with pkgs; [
           rustToolchain
           pkg-config
+          makeWrapper
         ];
 
         # Runtime dependencies
-        buildInputs = with pkgs; [
+        runtimeDeps = with pkgs; [
           # GUI dependencies (iced)
           wayland
-          wayland-protocols
           libxkbcommon
           vulkan-loader
 
@@ -41,12 +41,18 @@
           xorg.libXcursor
           xorg.libXrandr
           xorg.libXi
+        ];
 
-          # TLS for HTTP client
+        buildInputs = with pkgs; [
+          wayland
+          wayland-protocols
+          libxkbcommon
+          vulkan-loader
+          xorg.libX11
+          xorg.libXcursor
+          xorg.libXrandr
+          xorg.libXi
           openssl
-
-          # Clipboard
-          wl-clipboard
         ];
       in
       {
@@ -67,6 +73,11 @@
           postInstall = ''
             mkdir -p $out/share/applications
             cp ${./locallm.desktop} $out/share/applications/locallm.desktop
+            
+            # Wrap binary with runtime library paths
+            wrapProgram $out/bin/locallm \
+              --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath runtimeDeps}" \
+              --prefix PATH : "${pkgs.wl-clipboard}/bin"
           '';
 
           meta = with pkgs.lib; {
@@ -84,7 +95,7 @@
           OPENSSL_NO_VENDOR = 1;
 
           shellHook = ''
-            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath buildInputs}:$LD_LIBRARY_PATH"
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (buildInputs ++ runtimeDeps)}:$LD_LIBRARY_PATH"
           '';
         };
       }
